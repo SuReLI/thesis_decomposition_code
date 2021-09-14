@@ -73,102 +73,6 @@ def relaxed_penalized_knapsack_optimizer(demand_list, arc_capacity, objective_co
     return pattern, lifted_coeff_part
 
 
-def approximate_penalized_knapsack_optimizer(demand_list, arc_capacity, objective_coeff_per_commodity, overload_objective_coeff=1):
-    nb_commodities = len(demand_list)
-    order_list = [(objective_coeff_per_commodity[commodity_index] / demand_list[commodity_index], commodity_index) for commodity_index in range(nb_commodities)]
-    order_list.sort()
-    remaining_arc_capacity = max(0, arc_capacity)
-    value = min(0, arc_capacity)
-    pattern = []
-
-    while order_list != []:
-        ratio, commodity_index = order_list[-1]
-
-        if ratio <= 0:
-            break
-
-        elif demand_list[commodity_index] <= remaining_arc_capacity:
-            value += objective_coeff_per_commodity[commodity_index]
-            remaining_arc_capacity -= demand_list[commodity_index]
-            pattern.append(commodity_index)
-            order_list.pop()
-
-        else:
-            break
-
-    gained_value_list = order_list
-
-    while gained_value_list != []:
-
-        l = []
-        for _, commodity_index in gained_value_list:
-            objective_coeff, demand = objective_coeff_per_commodity[commodity_index], demand_list[commodity_index]
-            l.append((objective_coeff - overload_objective_coeff * max(0, demand - remaining_arc_capacity), commodity_index))
-        gained_value_list = l
-
-        gained_value, commodity_index = max(gained_value_list)
-
-        if gained_value <= 0:
-            break
-
-        else:
-            value += gained_value
-            remaining_arc_capacity = max(0, remaining_arc_capacity - demand_list[commodity_index])
-            pattern.append(commodity_index)
-            gained_value_list.remove((gained_value, commodity_index))
-
-    return pattern, value
-
-
-# @jit(nopython=True)
-def compute_all_lifted_coefficients2(demand_list, variable_pattern, variable_demand_list, coeff_list, fixed_pattern, RHS, remaining_arc_capacity):
-    fixed_demand_list = np.array([demand_list[commodity_index] for commodity_index in fixed_pattern])
-    fixed_demand = np.sum(fixed_demand_list)
-    value_matrix = -np.ones((len(variable_pattern) + len(fixed_pattern) + 1, remaining_arc_capacity + fixed_demand + 1))
-    lifted_demand_list = list(variable_demand_list)
-
-    for index, commodity_index in enumerate(fixed_pattern):
-        remaining_arc_capacity += demand_list[commodity_index]
-
-        lifted_coeff_part = compute_lifted_coeff_part2(value_matrix, coeff_list, lifted_demand_list, remaining_arc_capacity, len(coeff_list))
-
-        RHS, lifted_coeff = lifted_coeff_part, lifted_coeff_part - RHS
-        lifted_demand_list.append(demand_list[commodity_index])
-        coeff_list.append(lifted_coeff)
-
-    return coeff_list, RHS
-
-
-# @jit(nopython=True)
-def compute_lifted_coeff_part2(value_matrix, coeff_list, demand_list, remaining_arc_capacity, nb_commodities):
-    if nb_commodities == 0:
-        return 0
-
-    if remaining_arc_capacity == 0:
-        return np.sum(np.array([max(0, coeff_list[commodity_index] - demand_list[commodity_index]) for commodity_index in range(nb_commodities)]))
-
-    last_demand = demand_list[nb_commodities-1]
-    new_remaining_arc_capacity = max(0, remaining_arc_capacity - last_demand)
-    overflow = max(0, last_demand - remaining_arc_capacity)
-
-    if value_matrix[nb_commodities-1, remaining_arc_capacity] == -1:
-        value_0 = compute_lifted_coeff_part2(value_matrix, coeff_list, demand_list, remaining_arc_capacity, nb_commodities-1)
-        value_matrix[nb_commodities-1, remaining_arc_capacity] = value_0
-    else:
-        value_0 = value_matrix[nb_commodities-1, remaining_arc_capacity]
-
-    if value_matrix[nb_commodities-1, new_remaining_arc_capacity] == -1:
-        value_1 = compute_lifted_coeff_part2(value_matrix, coeff_list, demand_list, new_remaining_arc_capacity, nb_commodities-1)
-        value_matrix[nb_commodities-1, new_remaining_arc_capacity] = value_1
-    else:
-        value_1 = value_matrix[nb_commodities-1, new_remaining_arc_capacity]
-
-    lifted_coeff_part = max(value_0, value_1 + coeff_list[nb_commodities-1] - overflow)
-    value_matrix[nb_commodities, remaining_arc_capacity] = lifted_coeff_part
-
-    return lifted_coeff_part
-
-
 def compute_approximate_decomposition(demand_list, flow_per_commodity, arc_capacity, order_of_commodities="sorted"):
     # compute a decomposition of a flow distribution on an arc as a convex combination of commodity patterns. This decompostion is approximately optimal in the sense of pattern costs
     nb_commodities = len(demand_list)
@@ -241,220 +145,6 @@ def compute_approximate_decomposition2(demand_list, flow_per_commodity, arc_capa
     return pattern_cost_and_amount_list
 
 
-
-def separation_decomposition_norme_2(demand_list, flow_per_commodity, overload_value, arc_capacity, verbose=1):
-    nb_commodities = len(demand_list)
-    # print(nb_commodities, flow_per_commodity)
-
-    # Create optimization model
-    model = gurobipy.Model()
-    model.modelSense = gurobipy.GRB.MINIMIZE
-    model.Params.OutputFlag = 0
-    # model.Params.NonConvex = 2
-
-    pattern_cost_and_amount_list = compute_approximate_decomposition(demand_list, flow_per_commodity, arc_capacity)
-
-    # Create variables
-    pattern_cost_and_var_list = [(pattern, pattern_cost, model.addVar()) for pattern, pattern_cost, amount in pattern_cost_and_amount_list] # pattern choice variables
-    pattern_cost_and_var_list.extend([(pattern, 10**5, model.addVar()) for pattern, pattern_cost, amount in pattern_cost_and_amount_list])
-
-    convexity_constraint = model.addConstr(sum(var for pattern, pattern_cost, var in pattern_cost_and_var_list) == 1)
-
-    flow_var_per_commodity = [None]*nb_commodities
-    overload_var = sum(var * pattern_cost for pattern, pattern_cost, var in pattern_cost_and_var_list)
-    objective_function = (overload_var - overload_value) * (overload_var - overload_value)
-    for commodity_index in range(nb_commodities):
-        flow_var_per_commodity[commodity_index] = gurobipy.LinExpr(sum(var for pattern, pattern_cost, var in pattern_cost_and_var_list if commodity_index in pattern))
-        objective_function += (flow_var_per_commodity[commodity_index] - flow_per_commodity[commodity_index]) * (flow_var_per_commodity[commodity_index] - flow_per_commodity[commodity_index])
-
-    model.setObjective(objective_function)
-
-    print("aaaaaaaa")
-    print(flow_per_commodity)
-    print(overload_value)
-    print([pattern_cost for pattern, pattern_cost, var in pattern_cost_and_var_list])
-
-    i = 0
-    use_heuristic = False
-    while True:
-        model.update()
-        model.optimize()
-        i+=1
-
-        if verbose:
-            print(i, model.ObjVal, end='        \r')
-
-        commodity_dual_value_list =  2 * np.array([(flow_var_per_commodity[commodity_index].getValue() - flow_per_commodity[commodity_index]) for commodity_index in range(nb_commodities)])
-        overload_dual_value = 2 * (overload_var.getValue() - overload_value)
-        assert overload_dual_value >= -10**-10
-        overload_dual_value = max(0, overload_dual_value)
-        convexity_dual_value = convexity_constraint.Pi
-        # print("##########")
-        # print(flow_per_commodity)
-        # print([flow_var.getValue() for flow_var in flow_var_per_commodity])
-        # print(commodity_dual_value_list)
-        # print(overload_value, overload_var.getValue(), overload_dual_value, convexity_dual_value)
-
-
-        if sum(demand for demand, dual_value in zip(demand_list, commodity_dual_value_list) if dual_value != 0) <= arc_capacity:
-            pattern = [commodity_index for commodity_index, dual_value in enumerate(commodity_dual_value_list) if dual_value != 0]
-            subproblem_objective_value = -sum(commodity_dual_value_list)
-
-        elif use_heuristic:
-            pattern, subproblem_objective_value = approximate_penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list, overload_objective_coeff=overload_dual_value)
-
-        else:
-            pattern, subproblem_objective_value = penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list, overload_objective_coeff=overload_dual_value)
-
-        reduced_cost = -subproblem_objective_value - convexity_dual_value
-        pattern_cost = max(0, sum(demand_list[commodity_index] for commodity_index in pattern) - arc_capacity)
-        # print(pattern, pattern_cost)
-        # print(reduced_cost, subproblem_objective_value)
-
-        if reduced_cost < -10**-5:
-            use_heuristic = True
-            column = gurobipy.Column()
-            column.addTerms(1, convexity_constraint)
-
-            new_var = model.addVar(column=column)
-            pattern_cost_and_var_list.append((pattern, pattern_cost, new_var))
-
-            overload_var += new_var * pattern_cost
-            objective_function = (overload_var - overload_value) * (overload_var - overload_value)
-            for commodity_index in range(nb_commodities):
-                if commodity_index in pattern:
-                    flow_var_per_commodity[commodity_index] += new_var
-                objective_function += (flow_var_per_commodity[commodity_index] - flow_per_commodity[commodity_index]) * (flow_var_per_commodity[commodity_index] - flow_per_commodity[commodity_index])
-            model.setObjective(objective_function)
-
-        else:
-            if use_heuristic:
-                use_heuristic = False
-            else:
-                break
-
-    return (-commodity_dual_value_list, overload_dual_value, -convexity_dual_value), [(pattern, pattern_cost, var.X) for pattern, pattern_cost, var in pattern_cost_and_var_list if var.X > 10**-6]
-
-
-def separation_decomposition_aggregation(demand_list, flow_per_commodity, arc_capacity, verbose=0):
-    nb_commodities = len(demand_list)
-    max_commodity_subset_size = 3
-
-    # Create optimization model
-    model = gurobipy.Model()
-    model.modelSense = gurobipy.GRB.MINIMIZE
-    model.Params.OutputFlag = 0
-
-    pattern_cost_and_amount_list = compute_approximate_decomposition(demand_list, flow_per_commodity, arc_capacity)
-
-    # Create variables
-    pattern_cost_and_var_list = [(pattern, pattern_cost, model.addVar(obj=pattern_cost)) for pattern, pattern_cost, amount in pattern_cost_and_amount_list] # pattern choice variables
-
-    convexity_constraint = model.addConstr(sum(var for pattern, pattern_cost, var in pattern_cost_and_var_list) == 1)
-
-    # knapsack_constraint_dict = {}
-    # flow_var = gurobipy.LinExpr(sum(var * len(pattern) for pattern, pattern_cost, var in pattern_cost_and_var_list))
-    # knapsack_constraint_dict[tuple(range(nb_commodities))] = model.addConstr(-flow_var <= -sum(flow_per_commodity))
-
-    flow_var_list = [gurobipy.LinExpr(0) for commodity_index in range(nb_commodities)]
-    for pattern, pattern_cost, var in pattern_cost_and_var_list:
-        for commodity_index in pattern:
-            flow_var_list[commodity_index] += var
-
-    knapsack_constraint_dict = {}
-    commodity_subset = []
-    for commodity_index in range(nb_commodities):
-        commodity_subset.append(commodity_index)
-
-        if len(commodity_subset) == max_commodity_subset_size or commodity_index == nb_commodities-1:
-            LHS = sum(flow_var_list[commodity_index] for commodity_index in commodity_subset)
-            RHS = sum(flow_per_commodity[commodity_index] for commodity_index in commodity_subset)
-            knapsack_constraint_dict[tuple(commodity_subset)] = model.addConstr(-LHS <= -RHS)
-            commodity_subset = []
-
-    i = 0
-    while True:
-        model.update()
-        model.optimize()
-        i+=1
-
-        convexity_dual_value = convexity_constraint.Pi
-        commodity_dual_value_list = np.zeros(nb_commodities)
-        for commodity_subset in knapsack_constraint_dict:
-            for commodity_index in commodity_subset:
-                commodity_dual_value_list[commodity_index] += knapsack_constraint_dict[commodity_subset].Pi
-
-        if sum(demand for demand, dual_value in zip(demand_list, commodity_dual_value_list) if dual_value != 0) <= arc_capacity:
-            pattern = [commodity_index for commodity_index, dual_value in enumerate(commodity_dual_value_list) if dual_value != 0]
-            subproblem_objective_value = -sum(commodity_dual_value_list)
-
-        else:
-            pattern, subproblem_objective_value = penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
-
-        reduced_cost = -subproblem_objective_value - convexity_dual_value
-        pattern_cost = max(0, sum(demand_list[commodity_index] for commodity_index in pattern) - arc_capacity)
-
-        if reduced_cost < -10**-5:
-            column = gurobipy.Column()
-            column.addTerms(1, convexity_constraint)
-
-            for commodity_index in pattern:
-                for commodity_subset in knapsack_constraint_dict:
-                    if commodity_index in commodity_subset:
-                        column.addTerms(-1, knapsack_constraint_dict[commodity_subset])
-
-            new_var = model.addVar(obj=pattern_cost, column=column)
-            pattern_cost_and_var_list.append((pattern, pattern_cost, new_var))
-            commodity_subset = "####"
-
-        else:
-            flow_var_list = [gurobipy.LinExpr(0) for commodity_index in range(nb_commodities)]
-            for pattern, pattern_cost, var in pattern_cost_and_var_list:
-                for commodity_index in pattern:
-                    flow_var_list[commodity_index] += var
-
-            commodity_subset = []
-            added_constraint = False
-            for commodity_index in range(nb_commodities):
-                if flow_var_list[commodity_index].getValue() < flow_per_commodity[commodity_index] - 10**-5:
-                    commodity_subset.append(commodity_index)
-
-                    if len(commodity_subset) == max_commodity_subset_size:
-                        LHS = sum(flow_var_list[commodity_index] for commodity_index in commodity_subset)
-                        RHS = sum(flow_per_commodity[commodity_index] for commodity_index in commodity_subset)
-                        knapsack_constraint_dict[tuple(commodity_subset)] = model.addConstr(-LHS <= -RHS)
-                        added_constraint = True
-                        commodity_subset = []
-
-            if len(commodity_subset) > 0:
-                LHS = sum(flow_var_list[commodity_index] for commodity_index in commodity_subset)
-                RHS = sum(flow_per_commodity[commodity_index] for commodity_index in commodity_subset)
-                knapsack_constraint_dict[tuple(commodity_subset)] = model.addConstr(-LHS <= -RHS)
-                added_constraint = True
-
-            if not added_constraint:
-                break
-
-        if verbose:
-            print(i, model.ObjVal, len(demand_list), reduced_cost, commodity_subset, pattern, end='        \r')
-            if i > 600:
-                model.update()
-                model.optimize()
-                print()
-                print(demand_list, arc_capacity)
-                print(flow_per_commodity)
-                print(commodity_dual_value_list)
-                print(convexity_dual_value)
-                print(pattern)
-                print(reduced_cost)
-                print([(pattern, pattern_cost, var.X) for pattern, pattern_cost, var in pattern_cost_and_var_list])
-                print({commodity_subset : knapsack_constraint_dict[commodity_subset].Pi for commodity_subset in knapsack_constraint_dict})
-                assert False
-
-    return (-commodity_dual_value_list, 1, -convexity_dual_value), [(pattern, pattern_cost, var.X) for pattern, pattern_cost, var in pattern_cost_and_var_list if var.Vbasis == 0]
-
-
-
 def separation_decomposition(demand_list, flow_per_commodity, arc_capacity, initial_pattern_and_cost_list=None, verbose=0):
     # compute a decomposition of a flow distribution on an arc as a convex combination of commodity patterns. This decompostion is optimal in the sense of pattern costs
     # the last optimal dual variables represent the coefficients of a cut
@@ -499,9 +189,6 @@ def separation_decomposition(demand_list, flow_per_commodity, arc_capacity, init
             pattern = [commodity_index for commodity_index, dual_value in enumerate(commodity_dual_value_list) if dual_value != 0]
             subproblem_objective_value = -sum(commodity_dual_value_list)
 
-        elif use_heuristic:
-            pattern, subproblem_objective_value = approximate_penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
-
         else:
             pattern, subproblem_objective_value = penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
             # pattern2, subproblem_objective_value2 = gurobi_penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
@@ -512,20 +199,6 @@ def separation_decomposition(demand_list, flow_per_commodity, arc_capacity, init
 
         if verbose:
             print(i, model.ObjVal, len(demand_list), convexity_dual_value, end='        \r')
-            if i > 600 and use_heuristic == False:
-                model.update()
-                model.optimize()
-                print()
-                print(demand_list, arc_capacity)
-                print(flow_per_commodity)
-                print(commodity_dual_value_list)
-                print(convexity_dual_value)
-                print(pattern)
-                print(reduced_cost)
-                print(subproblem_objective_value)
-                print([(pattern, pattern_cost, var.X) for pattern, pattern_cost, var in pattern_cost_and_var_list if var.VBasis == 0])
-                print([(pattern, pattern_cost, var.X) for pattern, pattern_cost, var in pattern_cost_and_var_list])
-                assert False
 
         # if a pattern with a negative reduced cost has been computed, it is added to the model
         if reduced_cost < -10**-4:
@@ -578,7 +251,6 @@ def separation_decomposition_with_preprocessing(demand_list, flow_per_commodity,
     if len(variable_flow_per_commodity) == 0:
         constraint_coeff, pre_pattern_cost_and_amount_list = separation_decomposition(variable_demand_list, variable_flow_per_commodity, remaining_arc_capacity, verbose=verbose)
     else:
-        # constraint_coeff, pre_pattern_cost_and_amount_list = separation_decomposition_aggregation(variable_demand_list, variable_flow_per_commodity, remaining_arc_capacity, verbose=verbose)
         constraint_coeff, pre_pattern_cost_and_amount_list = separation_decomposition(variable_demand_list, variable_flow_per_commodity, remaining_arc_capacity, initial_pattern_and_cost_list=variable_initial_pattern_and_cost_list, verbose=verbose)
 
     variable_commodity_coeff_list, overload_coeff, constant_coeff = constraint_coeff
@@ -637,24 +309,6 @@ def in_out_separation_decomposition(demand_list, outter_flow_per_commodity, outt
         i += 1
         model.update()
         model.optimize()
-        if model.Status != 2 :
-            print()
-            print(i, ", status : ", model.Status)
-            print(outter_overload_value, inner_overload_value, arc_capacity)
-            print(demand_list)
-            print(outter_flow_per_commodity)
-            print(inner_flow_per_commodity)
-            print(pattern_cost_and_amount_list)
-            flow = np.zeros(nb_commodities)
-            for pattern, pattern_cost, amount in pattern_cost_and_amount_list:
-                for commodity_index in pattern:
-                    flow[commodity_index] += amount
-            print(flow)
-
-            print(model.Params.FeasibilityTol)
-            model.write("model.lp")
-            model.computeIIS()
-            model.write("modelIIS.ilp")
 
         # getting the dual variables
         commodity_dual_value_list = -np.array([knapsack_constraint_dict[commodity_index].Pi for commodity_index in range(nb_commodities)])
@@ -742,8 +396,6 @@ def in_out_separation_decomposition_iterative(demand_list, outter_flow_per_commo
         if sum(demand for demand, dual_value in zip(demand_list, commodity_dual_value_list) if dual_value != 0) <= arc_capacity:
             pattern = [commodity_index for commodity_index, dual_value in enumerate(commodity_dual_value_list) if dual_value != 0]
             subproblem_objective_value = -sum(commodity_dual_value_list)
-        elif use_heuristic:
-            pattern, subproblem_objective_value = approximate_penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
 
         else:
             pattern, subproblem_objective_value = penalized_knapsack_optimizer(demand_list, arc_capacity, -commodity_dual_value_list)
@@ -809,7 +461,6 @@ def in_out_separation_decomposition_iterative2(demand_list, outter_flow_per_comm
     while True:
         i+=1
         constraint_coeff, pattern_cost_and_amount_list = separation_decomposition_with_preprocessing(demand_list, current_flow_per_commodity, arc_capacity, initial_pattern_and_cost_list=inner_pattern_and_cost_list + old_pattern_and_cost_list, verbose=0)
-        # constraint_coeff, pattern_cost_and_amount_list = separation_decomposition_norme_2(demand_list, current_flow_per_commodity, current_overload_value, arc_capacity, verbose=1)
 
         decomposition_overload = sum(pattern_cost * amount for pattern, pattern_cost, amount in pattern_cost_and_amount_list)
         if current_overload_value > decomposition_overload - 10**-5:
@@ -978,75 +629,3 @@ def gurobi_penalized_knapsack_optimizer(demand_list, arc_capacity, objective_coe
     model.optimize()
 
     return [commodity_index for commodity_index in range(nb_commodities) if choice_var[commodity_index].X > 0.5], model.ObjVal
-
-if __name__ == "__main__":
-    for i in range(10**2):
-        demand_list = np.random.randint(1, 100, size=10)
-        commodity_dual_value_list = np.random.random(size=10) * 100
-        # commodity_dual_value_list = (commodity_dual_value_list/ 10**-3).astype(int)
-        arc_capacity = sum(demand_list)//2
-        # assert knapsack_solver(commodity_dual_value_list, demand_list, arc_capacity)[1] == gurobi_knapsack_solver(commodity_dual_value_list, demand_list, arc_capacity)[1]
-        print(demand_list)
-        print(commodity_dual_value_list)
-        print(arc_capacity)
-        a = penalized_knapsack_optimizer(demand_list, arc_capacity, commodity_dual_value_list)
-        b = gurobi_penalized_knapsack_optimizer(demand_list, arc_capacity, commodity_dual_value_list)
-        print(a)
-        print(b)
-        c = sum(commodity_dual_value_list[commodity_index] for commodity_index in a[0]) - max(0, sum(demand_list[commodity_index] for commodity_index in a[0]) - arc_capacity)
-        d = sum(commodity_dual_value_list[commodity_index] for commodity_index in b[0]) - max(0, sum(demand_list[commodity_index] for commodity_index in b[0]) - arc_capacity)
-        e = max(0, sum(demand_list[commodity_index] for commodity_index in a[0]) - arc_capacity)
-        f = max(0, sum(demand_list[commodity_index] for commodity_index in b[0]) - arc_capacity)
-        assert a[0] == b[0], (a,b, i, c, d, e, f)
-
-if False and __name__ == "__main__":
-    arc_capacity = 10**4
-    nb_commodities = 200
-    demand_list = []
-
-    for commodity_index in range(nb_commodities):
-        demand_list.append(random.randint(arc_capacity/nb_commodities, 3*arc_capacity/nb_commodities))
-
-    outter_flow_per_commodity = [0]*nb_commodities
-    inner_flow_per_commodity = [0]*nb_commodities
-    outter_remaining_arc_capacity = arc_capacity
-    inner_remaining_arc_capacity = arc_capacity
-    for commodity_index in range(nb_commodities // 3):
-        outter_flow_per_commodity[commodity_index] = 10
-        outter_remaining_arc_capacity -= demand_list[commodity_index]
-        inner_flow_per_commodity[commodity_index] = 10
-        inner_remaining_arc_capacity -= demand_list[commodity_index]
-
-    while outter_remaining_arc_capacity > 0:
-        commodity_index = random.randint(0, nb_commodities-1)
-        if outter_flow_per_commodity[commodity_index] < 10:
-            outter_flow_per_commodity[commodity_index] += 1
-            outter_remaining_arc_capacity -= 0.1 * demand_list[commodity_index]
-
-    outter_overload_value = 0
-
-    while inner_remaining_arc_capacity > 0:
-        commodity_index = random.randint(0, nb_commodities-1)
-        if inner_flow_per_commodity[commodity_index] < 10:
-            inner_flow_per_commodity[commodity_index] += 1
-            inner_remaining_arc_capacity -= 0.1 * demand_list[commodity_index]
-
-    inner_flow_per_commodity, outter_flow_per_commodity = np.array(inner_flow_per_commodity) / 10, np.array(outter_flow_per_commodity) / 10
-    # inner_flow_per_commodity = [min(1, max(0, outter_flow + (random.random()-0.5) * 10**-5)) for outter_flow in outter_flow_per_commodity]
-
-
-    print(inner_flow_per_commodity, outter_flow_per_commodity)
-    pattern_cost_and_amount_list = compute_approximate_decomposition(demand_list, inner_flow_per_commodity, arc_capacity)
-    inner_overload_value = sum(pattern_cost * amount for pattern, pattern_cost, amount in pattern_cost_and_amount_list)
-
-    # _, pattern_cost_and_amount_list = separation_decomposition_with_preprocessing(demand_list, inner_flow_per_commodity, arc_capacity)
-    # inner_overload_value = sum(pattern_cost * amount for pattern, pattern_cost, amount in pattern_cost_and_amount_list) + 10**-5
-    # _, pattern_cost_and_amount_list = separation_decomposition_with_preprocessing(demand_list, outter_flow_per_commodity, arc_capacity)
-    # outter_overload_value = sum(pattern_cost * amount for pattern, pattern_cost, amount in pattern_cost_and_amount_list) - 10**-5
-    # print(inner_overload_value, outter_overload_value)
-
-
-    # constraint_coeff, pattern_cost_and_amount_list = in_out_separation_decomposition_with_preprocessing(demand_list, outter_flow_per_commodity, outter_overload_value, inner_flow_per_commodity, inner_overload_value, arc_capacity, iterative_separation=True)
-    constraint_coeff, pattern_cost_and_amount_list = separation_decomposition(demand_list, outter_flow_per_commodity, arc_capacity)
-    # constraint_coeff, pattern_cost_and_amount_list = separation_decomposition_with_preprocessing(demand_list, outter_flow_per_commodity, arc_capacity)
-    print("\n", constraint_coeff)
